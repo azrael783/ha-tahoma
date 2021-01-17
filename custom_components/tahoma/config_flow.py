@@ -1,28 +1,37 @@
 """Config flow for TaHoma integration."""
-from asyncio import TimeoutError
 import logging
 
 from aiohttp import ClientError
-from pyhoma.client import TahomaClient
-from pyhoma.exceptions import BadCredentialsException, TooManyRequestsException
-import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.helpers import config_validation as cv
+from pyhoma.client import TahomaClient
+from pyhoma.exceptions import (
+    BadCredentialsException,
+    MaintenanceException,
+    TooManyRequestsException,
+)
+import voluptuous as vol
 
 from .const import (
+    CONF_HUB,
     CONF_UPDATE_INTERVAL,
+    DEFAULT_HUB,
     DEFAULT_UPDATE_INTERVAL,
-    DOMAIN,
     MIN_UPDATE_INTERVAL,
+    SUPPORTED_ENDPOINTS,
 )
+from .const import DOMAIN  # pylint: disable=unused-import
 
 _LOGGER = logging.getLogger(__name__)
 
 DATA_SCHEMA = vol.Schema(
-    {vol.Required(CONF_USERNAME): str, vol.Required(CONF_PASSWORD): str}
+    {
+        vol.Required(CONF_USERNAME): str,
+        vol.Required(CONF_PASSWORD): str,
+        vol.Required(CONF_HUB, default=DEFAULT_HUB): vol.In(SUPPORTED_ENDPOINTS.keys()),
+    }
 )
 
 
@@ -43,9 +52,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         username = user_input.get(CONF_USERNAME)
         password = user_input.get(CONF_PASSWORD)
 
-        async with TahomaClient(username, password) as client:
+        hub = user_input.get(CONF_HUB) or DEFAULT_HUB
+        endpoint = SUPPORTED_ENDPOINTS[hub]
+
+        async with TahomaClient(username, password, api_url=endpoint) as client:
             await client.login()
-            return self.async_create_entry(title=username, data=user_input)
+            return self.async_create_entry(
+                title=username,
+                data=user_input,
+            )
 
     async def async_step_user(self, user_input=None):
         """Handle the initial step via config flow."""
@@ -63,6 +78,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth"
             except (TimeoutError, ClientError):
                 errors["base"] = "cannot_connect"
+            except MaintenanceException:
+                errors["base"] = "server_in_maintenance"
             except Exception as exception:  # pylint: disable=broad-except
                 errors["base"] = "unknown"
                 _LOGGER.exception(exception)
@@ -87,6 +104,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except (TimeoutError, ClientError):
             _LOGGER.error("cannot_connect")
             return self.async_abort(reason="cannot_connect")
+        except MaintenanceException:
+            _LOGGER.error("server_in_maintenance")
+            return self.async_abort(reason="server_in_maintenance")
         except Exception as exception:  # pylint: disable=broad-except
             _LOGGER.exception(exception)
             return self.async_abort(reason="unknown")

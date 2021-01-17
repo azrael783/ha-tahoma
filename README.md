@@ -1,4 +1,6 @@
 ![screenshot of a device detail page in Home Assistant](https://raw.githubusercontent.com/iMicknl/ha-tahoma/master/media/tahoma_device_page.png)
+[![hacs_badge](https://img.shields.io/badge/HACS-Default-orange.svg)](https://github.com/custom-components/hacs)
+[![GitHub release](https://img.shields.io/github/release/iMicknl/ha-tahoma.svg)](https://GitHub.com/iMicknl/ha-tahoma/releases/)
 
 # Somfy TaHoma - Home Assistant
 
@@ -6,11 +8,13 @@
 
 This component builds upon the work of [@philklei](https://github.com/philklei) and is an updated version of his [original Tahoma integration](https://www.home-assistant.io/integrations/tahoma/) in Home Assistant with the goal of merging into core. The installation of this component will replace the original Tahoma integration and thus allows you to beta-test [all changes](./CHANGELOG.md).
 
-## Supported Somfy gateways
+## Supported (Somfy) hubs
 
 - Somfy TaHoma Box
 - Somfy Connexoon IO
 - Somfy Connexoon RTS
+- Cozytouch
+- Rexel
 
 ## Installation
 
@@ -102,3 +106,7 @@ If your device is listed in the device list, copy the firmware and create a [new
 ### Exclude devices
 
 The previous component had functionality to exclude devices from Home Assistant. Since we moved to the entity registry, this functionality is now offered by default in Home Assistant core. You can now disable entities via the interface.
+
+### Retrieve HomeKit code
+
+If your TaHoma box supports HomeKit natively, the integration will log the HomeKit code on start currently. This is currently an experimental implementation and in order to enable this, you need to have debug logging enabled.

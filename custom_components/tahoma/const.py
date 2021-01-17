@@ -8,10 +8,22 @@ from homeassistant.components.lock import DOMAIN as LOCK
 from homeassistant.components.sensor import DOMAIN as SENSOR
 from homeassistant.components.switch import DOMAIN as SWITCH
 
+CONF_HUB = "hub"
 DOMAIN = "tahoma"
 
-MIN_UPDATE_INTERVAL = 1
+DEFAULT_HUB = "Somfy TaHoma"
+SUPPORTED_ENDPOINTS = {
+    "Cozytouch": "https://ha110-1.overkiz.com/enduser-mobile-web/enduserAPI/",
+    "Somfy TaHoma": "https://tahomalink.com/enduser-mobile-web/enduserAPI/",
+    "Somfy Connexoon IO": "https://tahomalink.com/enduser-mobile-web/enduserAPI/",
+    "Somfy Connexoon RTS": "https://ha201-1.overkiz.com/enduser-mobile-web/enduserAPI/",
+    "Rexel": "https://ha112-1.overkiz.com/enduser-mobile-web/enduserAPI/",
+}
+
+MIN_REFRESH_STATE_INTERVAL = 10
+MIN_UPDATE_INTERVAL = 30
 DEFAULT_UPDATE_INTERVAL = 30
+DEFAULT_REFRESH_STATE_INTERVAL = 3600
 
 IGNORED_TAHOMA_TYPES = [
     "ProtocolGateway",
@@ -25,6 +37,7 @@ TAHOMA_TYPES = {
     "AirSensor": SENSOR,
     "Alarm": ALARM_CONTROL_PANEL,
     "AtlanticElectricalHeater": CLIMATE,  # widgetName, uiClass is HeatingSystem (not supported)
+    "AtlanticPassAPCDHW": CLIMATE,  # widgetName, uiClass is WaterHeatingSystem (not supported)
     "Awning": COVER,
     "CarButtonSensor": BINARY_SENSOR,
     "ConsumptionSensor": SENSOR,
@@ -78,4 +91,5 @@ CORE_ON_OFF_STATE = "core:OnOffState"
 COMMAND_OFF = "off"
 COMMAND_ON = "on"
 
+CONF_REFRESH_STATE_INTERVAL = "refresh_state_interval"
 CONF_UPDATE_INTERVAL = "update_interval"

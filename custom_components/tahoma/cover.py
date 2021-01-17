@@ -1,8 +1,6 @@
 """Support for TaHoma cover - shutters etc."""
 import logging
 
-import voluptuous as vol
-
 from homeassistant.components.cover import (
     ATTR_POSITION,
     ATTR_TILT_POSITION,
@@ -25,6 +23,7 @@ from homeassistant.components.cover import (
     CoverEntity,
 )
 from homeassistant.helpers import entity_platform
+import voluptuous as vol
 
 from .const import DOMAIN
 from .tahoma_device import TahomaDevice
@@ -47,8 +46,8 @@ COMMAND_STOP = "stop"
 COMMAND_STOP_IDENTIFY = "stopIdentify"
 COMMAND_UP = "up"
 
-COMMANDS_STOP = [COMMAND_STOP_IDENTIFY, COMMAND_STOP, COMMAND_MY]
-COMMANDS_STOP_TILT = [COMMAND_STOP_IDENTIFY, COMMAND_STOP, COMMAND_MY]
+COMMANDS_STOP = [COMMAND_STOP, COMMAND_STOP_IDENTIFY, COMMAND_MY]
+COMMANDS_STOP_TILT = [COMMAND_STOP, COMMAND_STOP_IDENTIFY, COMMAND_MY]
 COMMANDS_OPEN = [COMMAND_OPEN, COMMAND_UP, COMMAND_CYCLE]
 COMMANDS_OPEN_TILT = [COMMAND_OPEN_SLATS]
 COMMANDS_CLOSE = [COMMAND_CLOSE, COMMAND_DOWN, COMMAND_CYCLE]
@@ -71,6 +70,7 @@ CORE_OPEN_CLOSED_UNKNOWN_STATE = "core:OpenClosedUnknownState"
 CORE_PEDESTRIAN_POSITION_STATE = "core:PedestrianPositionState"
 CORE_PRIORITY_LOCK_TIMER_STATE = "core:PriorityLockTimerState"
 CORE_SLATS_OPEN_CLOSED_STATE = "core:SlatsOpenClosedState"
+CORE_SLATE_ORIENTATION_STATE = "core:SlateOrientationState"
 CORE_SLATS_ORIENTATION_STATE = "core:SlatsOrientationState"
 CORE_TARGET_CLOSURE_STATE = "core:TargetClosureState"
 MYFOX_SHUTTER_STATUS_STATE = "myfox:ShutterStatusState"
@@ -157,7 +157,7 @@ class TahomaCover(TahomaDevice, CoverEntity):
         if position is None or position < 0 or position > 100:
             return None
 
-        if "Horizontal" not in self.device.widget:
+        if not self._reversed_position_device():
             position = 100 - position
 
         return position
@@ -168,15 +168,16 @@ class TahomaCover(TahomaDevice, CoverEntity):
 
         None is unknown, 0 is closed, 100 is fully open.
         """
-        position = self.select_state(CORE_SLATS_ORIENTATION_STATE)
+        position = self.select_state(
+            CORE_SLATS_ORIENTATION_STATE, CORE_SLATE_ORIENTATION_STATE
+        )
         return 100 - position if position is not None else None
 
     async def async_set_cover_position(self, **kwargs):
         """Move the cover to a specific position."""
         position = 100 - kwargs.get(ATTR_POSITION, 0)
 
-        # HorizontalAwning devices need a reversed position that can not be obtained via the API
-        if "Horizontal" in self.device.widget:
+        if self._reversed_position_device():
             position = kwargs.get(ATTR_POSITION, 0)
 
         await self.async_execute_command(
@@ -187,8 +188,7 @@ class TahomaCover(TahomaDevice, CoverEntity):
         """Move the cover to a specific position with a low speed."""
         position = 100 - kwargs.get(ATTR_POSITION, 0)
 
-        # HorizontalAwning devices need a reversed position that can not be obtained via the API
-        if "Horizontal" in self.device.widget:
+        if self._reversed_position_device():
             position = kwargs.get(ATTR_POSITION, 0)
 
         await self.async_execute_command(
@@ -243,8 +243,7 @@ class TahomaCover(TahomaDevice, CoverEntity):
         ):
             if self.select_state(IO_PRIORITY_LOCK_ORIGINATOR_STATE) == "wind":
                 return ICON_WEATHER_WINDY
-            else:
-                return ICON_LOCK_ALERT
+            return ICON_LOCK_ALERT
 
         return None
 
@@ -267,7 +266,8 @@ class TahomaCover(TahomaDevice, CoverEntity):
     async def async_stop_cover(self, **_):
         """Stop the cover."""
         await self.async_cancel_or_stop_cover(
-            COMMANDS_OPEN + COMMANDS_SET_POSITION + COMMANDS_CLOSE, COMMANDS_STOP,
+            COMMANDS_OPEN + COMMANDS_SET_POSITION + COMMANDS_CLOSE,
+            COMMANDS_STOP,
         )
 
     async def async_stop_cover_tilt(self, **_):
@@ -279,6 +279,8 @@ class TahomaCover(TahomaDevice, CoverEntity):
 
     async def async_cancel_or_stop_cover(self, cancel_commands, stop_commands) -> None:
         """Cancel running execution or send stop command."""
+        # Cancelling a running execution will stop the cover movement
+        # Retrieve executions initiated via Home Assistant from Data Update Coordinator queue
         exec_id = next(
             (
                 exec_id
@@ -290,12 +292,30 @@ class TahomaCover(TahomaDevice, CoverEntity):
             None,
         )
 
-        # Cancelling a running execution will stop the cover movement
         if exec_id:
-            await self.async_cancel_command(exec_id)
-        # Fallback to available stop commands when execution was initiated outside Home Assistant
-        else:
-            await self.async_execute_command(self.select_command(*stop_commands))
+            return await self.async_cancel_command(exec_id)
+
+        # Retrieve executions initiated outside Home Assistant via API
+        executions = await self.coordinator.client.get_current_executions()
+        exec_id = next(
+            (
+                execution.id
+                for execution in executions
+                # Reverse dictionary to cancel the last added execution
+                for action in reversed(execution.action_group.get("actions"))
+                for command in action.get("commands")
+                if action.get("deviceurl") == self.device.deviceurl
+                and command.get("name") in cancel_commands
+            ),
+            None,
+        )
+
+        if exec_id:
+            return await self.async_cancel_command(exec_id)
+
+        # Fallback to available stop commands when no executions are found
+        # Stop commands don't work with all devices, due to a bug in Somfy service
+        await self.async_execute_command(self.select_command(*stop_commands))
 
     async def async_my(self, **_):
         """Set cover to preset position."""
@@ -355,3 +375,9 @@ class TahomaCover(TahomaDevice, CoverEntity):
             supported_features |= SUPPORT_MY
 
         return supported_features
+
+    def _reversed_position_device(self):
+        """Return true if the device need a reversed position that can not be obtained via the API."""
+        return (
+            "Horizontal" in self.device.widget or self.device.widget == "AwningValance"
+        )

@@ -4,29 +4,34 @@ from collections import defaultdict
 from datetime import timedelta
 import logging
 
-from aiohttp import CookieJar
+from aiohttp import ClientError, ServerDisconnectedError
+from homeassistant.components.scene import DOMAIN as SCENE
+from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
+from homeassistant.const import CONF_EXCLUDE, CONF_PASSWORD, CONF_SOURCE, CONF_USERNAME
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_interval
 from pyhoma.client import TahomaClient
-from pyhoma.exceptions import BadCredentialsException, TooManyRequestsException
-from pyhoma.models import Command
+from pyhoma.exceptions import (
+    BadCredentialsException,
+    MaintenanceException,
+    TooManyRequestsException,
+)
+from pyhoma.models import Command, Device
 import voluptuous as vol
 
-from homeassistant import config_entries
-from homeassistant.components.scene import DOMAIN as SCENE
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import (
-    CONF_EXCLUDE,
-    CONF_PASSWORD,
-    CONF_USERNAME,
-    EVENT_HOMEASSISTANT_START,
-)
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import aiohttp_client, config_validation as cv
-
 from .const import (
+    CONF_HUB,
+    CONF_REFRESH_STATE_INTERVAL,
     CONF_UPDATE_INTERVAL,
+    DEFAULT_HUB,
+    DEFAULT_REFRESH_STATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     IGNORED_TAHOMA_TYPES,
+    SUPPORTED_ENDPOINTS,
     TAHOMA_TYPES,
 )
 from .coordinator import TahomaDataUpdateCoordinator
@@ -34,6 +39,9 @@ from .coordinator import TahomaDataUpdateCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 SERVICE_EXECUTE_COMMAND = "execute_command"
+
+HOMEKIT_SETUP_CODE = "homekit:SetupCode"
+HOMEKIT_STACK = "HomekitStack"
 
 CONFIG_SCHEMA = vol.Schema(
     {
@@ -72,7 +80,7 @@ async def async_setup(hass: HomeAssistant, config: dict):
     hass.async_create_task(
         hass.config_entries.flow.async_init(
             DOMAIN,
-            context={"source": config_entries.SOURCE_IMPORT},
+            context={CONF_SOURCE: SOURCE_IMPORT},
             data=configuration,
         )
     )
@@ -86,21 +94,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     username = entry.data.get(CONF_USERNAME)
     password = entry.data.get(CONF_PASSWORD)
+    hub = entry.data.get(CONF_HUB) or DEFAULT_HUB
+    endpoint = SUPPORTED_ENDPOINTS[hub]
 
-    session = aiohttp_client.async_create_clientsession(
-        hass, cookie_jar=CookieJar(unsafe=True)
+    session = async_get_clientsession(hass)
+    client = TahomaClient(
+        username,
+        password,
+        session=session,
+        api_url=endpoint,
     )
-
-    client = TahomaClient(username, password, session=session)
 
     try:
         await client.login()
-    except TooManyRequestsException:
-        _LOGGER.error("too_many_requests")
-        return False
+        devices = await client.get_devices()
+        scenarios = await client.get_scenarios()
     except BadCredentialsException:
         _LOGGER.error("invalid_auth")
         return False
+    except TooManyRequestsException as exception:
+        _LOGGER.error("too_many_requests")
+        raise ConfigEntryNotReady from exception
+    except (TimeoutError, ClientError, ServerDisconnectedError) as exception:
+        _LOGGER.error("cannot_connect")
+        raise ConfigEntryNotReady from exception
+    except MaintenanceException as exception:
+        _LOGGER.error("server_in_maintenance")
+        raise ConfigEntryNotReady from exception
     except Exception as exception:  # pylint: disable=broad-except
         _LOGGER.exception(exception)
         return False
@@ -112,63 +132,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         _LOGGER,
         name="TaHoma Event Fetcher",
         client=client,
-        devices=await client.get_devices(),
+        devices=devices,
         update_interval=timedelta(seconds=update_interval),
     )
 
     await tahoma_coordinator.async_refresh()
 
     entities = defaultdict(list)
-    entities[SCENE] = await client.get_scenarios()
-
-    hass.data[DOMAIN][entry.entry_id] = {
-        "entities": entities,
-        "coordinator": tahoma_coordinator,
-        "update_listener": entry.add_update_listener(update_listener),
-    }
+    entities[SCENE] = scenarios
 
     for device in tahoma_coordinator.data.values():
         platform = TAHOMA_TYPES.get(device.widget) or TAHOMA_TYPES.get(device.ui_class)
         if platform:
             entities[platform].append(device)
+            _LOGGER.debug(
+                "Added TaHoma device (%s - %s - %s - %s)",
+                device.controllable_name,
+                device.ui_class,
+                device.widget,
+                device.deviceurl,
+            )
         elif (
             device.widget not in IGNORED_TAHOMA_TYPES
             and device.ui_class not in IGNORED_TAHOMA_TYPES
         ):
             _LOGGER.debug(
-                "Unsupported TaHoma device detected (%s - %s - %s)",
+                "Unsupported TaHoma device detected (%s - %s - %s - %s)",
                 device.controllable_name,
                 device.ui_class,
                 device.widget,
+                device.deviceurl,
             )
+
+        if device.widget == HOMEKIT_STACK:
+            print_homekit_setup_code(device)
 
     for platform in entities:
         hass.async_create_task(
             hass.config_entries.async_forward_entry_setup(entry, platform)
         )
-
-    def _register_services(event):
-        """Register the domain services."""
-        hass.services.async_register(
-            DOMAIN, SERVICE_REFRESH_STATES, handle_service_refresh_states
-        )
-
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_EXECUTE_COMMAND,
-            handle_execute_command,
-            vol.Schema(
-                {
-                    vol.Required("entity_id"): cv.string,
-                    vol.Required("command"): cv.string,
-                    vol.Optional("args", default=[]): vol.All(
-                        cv.ensure_list, [vol.Any(str, int)]
-                    ),
-                }
-            ),
-        )
-
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_START, _register_services)
 
     async def handle_execute_command(call):
         """Handle execute command service."""
@@ -180,17 +182,49 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             "Home Assistant Service",
         )
 
-    async def handle_service_refresh_states(call):
-        """Handle the service call."""
+    async def handle_refresh_states(*_):
+        """Request a state refresh and notify DataUpdateCoordinator."""
+        tahoma_coordinator.set_refresh_in_progress(True)
+        tahoma_coordinator.set_update_interval(1)
         await client.refresh_states()
+        await tahoma_coordinator.async_refresh()
+
+    hass.services.async_register(DOMAIN, SERVICE_REFRESH_STATES, handle_refresh_states)
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_EXECUTE_COMMAND,
+        handle_execute_command,
+        vol.Schema(
+            {
+                vol.Required("entity_id"): cv.string,
+                vol.Required("command"): cv.string,
+                vol.Optional("args", default=[]): vol.All(
+                    cv.ensure_list, [vol.Any(str, int)]
+                ),
+            }
+        ),
+    )
+
+    refresh_state_interval = entry.options.get(
+        CONF_REFRESH_STATE_INTERVAL, DEFAULT_REFRESH_STATE_INTERVAL
+    )
+    task_refresh_state = async_track_time_interval(
+        hass, handle_refresh_states, timedelta(seconds=refresh_state_interval)
+    )
+
+    hass.data[DOMAIN][entry.entry_id] = {
+        "entities": entities,
+        "coordinator": tahoma_coordinator,
+        "update_listener": entry.add_update_listener(update_listener),
+        "task_refresh_state": task_refresh_state,
+    }
 
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Unload a config entry."""
-
-    hass.data[DOMAIN][entry.entry_id]["update_listener"]()
     entities_per_platform = hass.data[DOMAIN][entry.entry_id]["entities"]
 
     unload_ok = all(
@@ -203,6 +237,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     )
 
     if unload_ok:
+        hass.data[DOMAIN][entry.entry_id]["update_listener"]()
         hass.data[DOMAIN].pop(entry.entry_id)
 
     return unload_ok
@@ -210,6 +245,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
 
 async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
     """Update when config_entry options update."""
+
+    async def handle_refresh_states(*_):
+        """Request a state refresh and notify DataUpdateCoordinator."""
+        coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+
+        coordinator.set_refresh_in_progress(True)
+        coordinator.set_update_interval(1)
+        await coordinator.client.refresh_states()
+        await coordinator.async_refresh()
+
     if entry.options[CONF_UPDATE_INTERVAL]:
         coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
         new_update_interval = timedelta(seconds=entry.options[CONF_UPDATE_INTERVAL])
@@ -217,3 +262,25 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
         coordinator.original_update_interval = new_update_interval
 
         await coordinator.async_refresh()
+
+    if entry.options[CONF_REFRESH_STATE_INTERVAL]:
+        # Cancel current task
+        hass.data[DOMAIN][entry.entry_id]["task_refresh_state"]()
+
+        # Create new task, with new time interval
+        hass.data[DOMAIN][entry.entry_id][
+            "task_refresh_state"
+        ] = async_track_time_interval(
+            hass,
+            handle_refresh_states,
+            timedelta(seconds=entry.options[CONF_REFRESH_STATE_INTERVAL]),
+        )
+
+
+def print_homekit_setup_code(device: Device):
+    """Retrieve and print HomeKit Setup Code."""
+    if device.attributes:
+        homekit = device.attributes.get(HOMEKIT_SETUP_CODE)
+
+        if homekit:
+            _LOGGER.info("HomeKit support detected with setup code %s.", homekit.value)
