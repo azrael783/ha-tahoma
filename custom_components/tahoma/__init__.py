@@ -206,11 +206,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         ),
     )
 
-    refresh_state_interval = entry.options.get(
-        CONF_REFRESH_STATE_INTERVAL, DEFAULT_REFRESH_STATE_INTERVAL
+    refresh_state_interval = timedelta(
+        seconds=entry.options.get(
+            CONF_REFRESH_STATE_INTERVAL, DEFAULT_REFRESH_STATE_INTERVAL
+        )
     )
     task_refresh_state = async_track_time_interval(
-        hass, handle_refresh_states, timedelta(seconds=refresh_state_interval)
+        hass, handle_refresh_states, refresh_state_interval
+    )
+
+    _LOGGER.debug(
+        "Initialized Refresh State task with %s interval.", str(refresh_state_interval)
     )
 
     hass.data[DOMAIN][entry.entry_id] = {
@@ -266,6 +272,7 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
     if entry.options[CONF_REFRESH_STATE_INTERVAL]:
         # Cancel current task
         hass.data[DOMAIN][entry.entry_id]["task_refresh_state"]()
+        refresh_interval = timedelta(seconds=entry.options[CONF_REFRESH_STATE_INTERVAL])
 
         # Create new task, with new time interval
         hass.data[DOMAIN][entry.entry_id][
@@ -273,7 +280,11 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
         ] = async_track_time_interval(
             hass,
             handle_refresh_states,
-            timedelta(seconds=entry.options[CONF_REFRESH_STATE_INTERVAL]),
+            refresh_interval,
+        )
+
+        _LOGGER.debug(
+            "Changed Refresh State task to %s interval.", str(refresh_interval)
         )
 
 
