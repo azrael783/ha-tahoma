@@ -83,6 +83,7 @@ ICON_WEATHER_WINDY = "mdi:weather-windy"
 IO_PRIORITY_LOCK_LEVEL_STATE = "io:PriorityLockLevelState"
 IO_PRIORITY_LOCK_ORIGINATOR_STATE = "io:PriorityLockOriginatorState"
 
+STATE_OPEN = "open"
 STATE_CLOSED = "closed"
 
 SERVICE_COVER_MY_POSITION = "set_cover_my_position"
@@ -218,6 +219,9 @@ class TahomaCover(TahomaEntity, CoverEntity):
         )
 
         if state is not None:
+            if self._reversed_position_device():
+                return state != STATE_CLOSED
+
             return state == STATE_CLOSED
 
         if self.current_cover_position is not None:
